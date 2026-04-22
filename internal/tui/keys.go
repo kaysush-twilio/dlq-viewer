@@ -3,13 +3,15 @@ package tui
 import "github.com/charmbracelet/bubbles/key"
 
 type keyMap struct {
-	Up      key.Binding
-	Down    key.Binding
-	Enter   key.Binding
-	Back    key.Binding
-	Tab     key.Binding
-	Refresh key.Binding
-	Quit    key.Binding
+	Up       key.Binding
+	Down     key.Binding
+	PageUp   key.Binding
+	PageDown key.Binding
+	Enter    key.Binding
+	Back     key.Binding
+	Tab      key.Binding
+	Refresh  key.Binding
+	Quit     key.Binding
 }
 
 var keys = keyMap{
@@ -20,6 +22,14 @@ var keys = keyMap{
 	Down: key.NewBinding(
 		key.WithKeys("down", "j"),
 		key.WithHelp("↓/j", "down"),
+	),
+	PageUp: key.NewBinding(
+		key.WithKeys("pgup", "ctrl+u"),
+		key.WithHelp("PgUp/ctrl+u", "page up"),
+	),
+	PageDown: key.NewBinding(
+		key.WithKeys("pgdown", "ctrl+d"),
+		key.WithHelp("PgDn/ctrl+d", "page down"),
 	),
 	Enter: key.NewBinding(
 		key.WithKeys("enter"),

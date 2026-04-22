@@ -2,6 +2,7 @@ package sqs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -24,6 +25,9 @@ type Message struct {
 	Attributes    map[string]string
 	Timestamp     time.Time
 	RetryCount    string
+	EventType     string
+	StoreID       string
+	AccountID     string
 }
 
 func NewClient(ctx context.Context, region, profile string) (*Client, error) {
@@ -115,6 +119,9 @@ func (c *Client) ReceiveMessages(ctx context.Context, queueURL string, maxMessag
 			m.RetryCount = retry
 		}
 
+		// Parse JSON body to extract event_type, store_id, account_id
+		parseBodyFields(&m)
+
 		messages = append(messages, m)
 	}
 
@@ -130,14 +137,20 @@ func (c *Client) PeekAllMessages(ctx context.Context, queueURL string, maxTotal 
 	var allMessages []Message
 	seen := make(map[string]bool)
 
-	for len(allMessages) < maxTotal {
+	emptyPolls := 0
+	maxEmptyPolls := 3
+	duplicatePolls := 0
+	maxDuplicatePolls := 5
+
+	for len(allMessages) < maxTotal && emptyPolls < maxEmptyPolls && duplicatePolls < maxDuplicatePolls {
 		msgs, err := c.ReceiveMessages(ctx, queueURL, 10)
 		if err != nil {
 			return allMessages, err
 		}
 
 		if len(msgs) == 0 {
-			break
+			emptyPolls++
+			continue
 		}
 
 		newFound := false
@@ -150,7 +163,10 @@ func (c *Client) PeekAllMessages(ctx context.Context, queueURL string, maxTotal 
 		}
 
 		if !newFound {
-			break
+			duplicatePolls++
+		} else {
+			duplicatePolls = 0
+			emptyPolls = 0
 		}
 	}
 
@@ -160,4 +176,45 @@ func (c *Client) PeekAllMessages(ctx context.Context, queueURL string, maxTotal 
 	})
 
 	return allMessages, nil
+}
+
+func parseBodyFields(m *Message) {
+	var body map[string]interface{}
+	if err := json.Unmarshal([]byte(m.Body), &body); err != nil {
+		return
+	}
+
+	// Try common field locations
+	m.EventType = extractString(body, "event_type", "eventType", "type")
+	m.StoreID = extractString(body, "store_id", "storeId", "store")
+	m.AccountID = extractString(body, "account_sid", "accountSid", "account_id", "accountId")
+
+	// Check nested "data" or "payload" objects
+	for _, nested := range []string{"data", "payload", "message"} {
+		if data, ok := body[nested].(map[string]interface{}); ok {
+			if m.EventType == "" {
+				m.EventType = extractString(data, "event_type", "eventType", "type")
+			}
+			if m.StoreID == "" {
+				m.StoreID = extractString(data, "store_id", "storeId", "store")
+			}
+			if m.AccountID == "" {
+				m.AccountID = extractString(data, "account_sid", "accountSid", "account_id", "accountId")
+			}
+		}
+	}
+}
+
+func extractString(data map[string]interface{}, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := data[k]; ok {
+			switch val := v.(type) {
+			case string:
+				return val
+			case float64:
+				return fmt.Sprintf("%.0f", val)
+			}
+		}
+	}
+	return ""
 }
