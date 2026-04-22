@@ -60,21 +60,31 @@ func (c *Client) GetQueueURL(ctx context.Context, queueName string) (string, err
 	return *result.QueueUrl, nil
 }
 
-func (c *Client) GetQueueAttributes(ctx context.Context, queueURL string) (approxMessages int, err error) {
+type QueueStats struct {
+	ApproxMessages    int
+	ApproxNotVisible  int
+}
+
+func (c *Client) GetQueueAttributes(ctx context.Context, queueURL string) (QueueStats, error) {
 	result, err := c.sqs.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 		QueueUrl: aws.String(queueURL),
 		AttributeNames: []types.QueueAttributeName{
 			types.QueueAttributeNameApproximateNumberOfMessages,
+			types.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
 		},
 	})
 	if err != nil {
-		return 0, fmt.Errorf("failed to get queue attributes: %w", err)
+		return QueueStats{}, fmt.Errorf("failed to get queue attributes: %w", err)
 	}
 
+	var stats QueueStats
 	if val, ok := result.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessages)]; ok {
-		fmt.Sscanf(val, "%d", &approxMessages)
+		fmt.Sscanf(val, "%d", &stats.ApproxMessages)
 	}
-	return approxMessages, nil
+	if val, ok := result.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessagesNotVisible)]; ok {
+		fmt.Sscanf(val, "%d", &stats.ApproxNotVisible)
+	}
+	return stats, nil
 }
 
 func (c *Client) ReceiveMessages(ctx context.Context, queueURL string, maxMessages int) ([]Message, error) {

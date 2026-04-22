@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -33,25 +32,27 @@ const (
 )
 
 type Model struct {
-	config             Config
-	activeQueue        QueueType
-	messages           []sqs.Message
-	retryableMessages  []sqs.Message
-	failedMessages     []sqs.Message
-	selectedIdx        int
-	listScrollOffset   int
-	viewport           viewport.Model
-	viewportReady      bool
-	detailView         bool
-	loading            bool
-	err                error
-	width              int
-	height             int
-	retryableURL       string
-	failedURL          string
-	retryableCount     int
-	failedCount        int
-	lastRefresh        time.Time
+	config               Config
+	activeQueue          QueueType
+	messages             []sqs.Message
+	retryableMessages    []sqs.Message
+	failedMessages       []sqs.Message
+	selectedIdx          int
+	listScrollOffset     int
+	viewport             viewport.Model
+	viewportReady        bool
+	detailView           bool
+	loading              bool
+	err                  error
+	width                int
+	height               int
+	retryableURL         string
+	failedURL            string
+	retryableCount       int
+	retryableNotVisible  int
+	failedCount          int
+	failedNotVisible     int
+	lastRefresh          time.Time
 }
 
 type messagesLoadedMsg struct {
@@ -61,14 +62,14 @@ type messagesLoadedMsg struct {
 }
 
 type queueInfoMsg struct {
-	retryableURL   string
-	failedURL      string
-	retryableCount int
-	failedCount    int
-	err            error
+	retryableURL        string
+	failedURL           string
+	retryableCount      int
+	retryableNotVisible int
+	failedCount         int
+	failedNotVisible    int
+	err                 error
 }
-
-type tickMsg time.Time
 
 func NewModel(config Config) Model {
 	return Model{
@@ -79,13 +80,7 @@ func NewModel(config Config) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(loadQueueInfo(m.config), tickCmd())
-}
-
-func tickCmd() tea.Cmd {
-	return tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
+	return loadQueueInfo(m.config)
 }
 
 func loadQueueInfo(config Config) tea.Cmd {
@@ -102,14 +97,16 @@ func loadQueueInfo(config Config) tea.Cmd {
 			return queueInfoMsg{err: err}
 		}
 
-		retryableCount, _ := config.SQSClient.GetQueueAttributes(ctx, retryableURL)
-		failedCount, _ := config.SQSClient.GetQueueAttributes(ctx, failedURL)
+		retryableStats, _ := config.SQSClient.GetQueueAttributes(ctx, retryableURL)
+		failedStats, _ := config.SQSClient.GetQueueAttributes(ctx, failedURL)
 
 		return queueInfoMsg{
-			retryableURL:   retryableURL,
-			failedURL:      failedURL,
-			retryableCount: retryableCount,
-			failedCount:    failedCount,
+			retryableURL:        retryableURL,
+			failedURL:           failedURL,
+			retryableCount:      retryableStats.ApproxMessages,
+			retryableNotVisible: retryableStats.ApproxNotVisible,
+			failedCount:         failedStats.ApproxMessages,
+			failedNotVisible:    failedStats.ApproxNotVisible,
 		}
 	}
 }
@@ -117,7 +114,7 @@ func loadQueueInfo(config Config) tea.Cmd {
 func loadMessages(client *sqs.Client, queueURL string, queueType QueueType) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		messages, err := client.PeekAllMessages(ctx, queueURL, 100)
+		messages, err := client.PeekAllMessages(ctx, queueURL, 1000)
 		return messagesLoadedMsg{messages: messages, queueType: queueType, err: err}
 	}
 }
@@ -218,7 +215,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.retryableURL = msg.retryableURL
 		m.failedURL = msg.failedURL
 		m.retryableCount = msg.retryableCount
+		m.retryableNotVisible = msg.retryableNotVisible
 		m.failedCount = msg.failedCount
+		m.failedNotVisible = msg.failedNotVisible
 		return m, m.loadCurrentQueue()
 
 	case messagesLoadedMsg:
@@ -230,8 +229,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = nil
 
-		// Merge new messages with cached ones
-		merged := mergeMessages(m.getCachedMessages(msg.queueType), msg.messages)
+		// Use fresh messages only (no merging with stale cache)
+		merged := msg.messages
 
 		if msg.queueType == RetryableQueue {
 			m.retryableMessages = merged
@@ -247,9 +246,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedIdx >= len(m.messages) {
 			m.selectedIdx = max(0, len(m.messages)-1)
 		}
-
-	case tickMsg:
-		cmds = append(cmds, tea.Batch(loadQueueInfo(m.config), tickCmd()))
 	}
 
 	return m, tea.Batch(cmds...)
@@ -262,41 +258,6 @@ func (m Model) loadCurrentQueue() tea.Cmd {
 		return loadMessages(m.config.SQSClient, m.failedURL, FailedQueue)
 	}
 	return nil
-}
-
-func (m Model) getCachedMessages(qt QueueType) []sqs.Message {
-	if qt == RetryableQueue {
-		return m.retryableMessages
-	}
-	return m.failedMessages
-}
-
-func mergeMessages(cached, newMsgs []sqs.Message) []sqs.Message {
-	seen := make(map[string]bool)
-	result := make([]sqs.Message, 0, len(cached)+len(newMsgs))
-
-	// Add all cached messages
-	for _, m := range cached {
-		if !seen[m.MessageID] {
-			seen[m.MessageID] = true
-			result = append(result, m)
-		}
-	}
-
-	// Add new messages not in cache
-	for _, m := range newMsgs {
-		if !seen[m.MessageID] {
-			seen[m.MessageID] = true
-			result = append(result, m)
-		}
-	}
-
-	// Sort by timestamp reverse chronological
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Timestamp.After(result[j].Timestamp)
-	})
-
-	return result
 }
 
 func (m Model) View() string {
@@ -334,8 +295,8 @@ func (m Model) headerView() string {
 }
 
 func (m Model) tabsView() string {
-	retryableTab := fmt.Sprintf("Retryable (%d)", m.retryableCount)
-	failedTab := fmt.Sprintf("Failed (%d)", m.failedCount)
+	retryableTab := fmt.Sprintf("Retryable (%d visible, %d in-flight)", m.retryableCount, m.retryableNotVisible)
+	failedTab := fmt.Sprintf("Failed (%d visible, %d in-flight)", m.failedCount, m.failedNotVisible)
 
 	if m.activeQueue == RetryableQueue {
 		retryableTab = activeTabStyle.Render(retryableTab)
